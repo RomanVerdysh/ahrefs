@@ -24,7 +24,7 @@
 
         // Настройки для Batch Analysis
         BATCH_ANALYSIS: {
-            DOMAINS_PER_BATCH: 30,
+            DOMAINS_PER_BATCH: 200,
             FORM_SELECTOR: '#batch_requests',
             ANALYSE_BUTTON: '#startAnalysisButton',
             EXPORT_BUTTON: '#baExportButton',
