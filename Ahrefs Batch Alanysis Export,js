@@ -1,0 +1,546 @@
+// ==UserScript==
+// @name         Ahrefs Batch Alanysis Export
+// @namespace    http://tampermonkey.net/
+// @version      1
+// @description  By list does domain checks from Batch Analysis Ahrefs and exports to XLSX.
+// @author       Roman Verdush (https://romanus.ru)
+// @match        *://*.ahrefs.com/*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Пользовательские настройки
+    const CONFIG = {
+        // Задержка между загрузкой страниц (в миллисекундах)
+        PAGE_LOAD_DELAY: 2000,
+
+        // Начальное положение контейнера
+        INITIAL_POSITION: {
+            bottom: '20px',
+            right: '40px'
+        },
+
+        // Настройки для Batch Analysis
+        BATCH_ANALYSIS: {
+            DOMAINS_PER_BATCH: 30,
+            FORM_SELECTOR: '#batch_requests',
+            ANALYSE_BUTTON: '#startAnalysisButton',
+            EXPORT_BUTTON: '#baExportButton',
+            START_EXPORT_BUTTON: '#start_export_w_selected_charset',
+            CANCEL_BUTTON: 'button[data-dismiss="modal"]',  // Селектор кнопки Cancel
+            EXPORT_WAIT_TIME: 35000,  // Время ожидания после нажатия Start Export
+            MAX_WAIT_ATTEMPTS: 10,     // Максимальное количество попыток ожидания кнопок
+            MODAL_SELECTOR: '#CSVExportModalDialog',
+            MODAL_CLOSE_WAIT: 5000,  // Время ожидания закрытия модального окна
+            MODAL_CHECK_INTERVAL: 500,  // Интервал проверки состояния модального окна
+            TABLE_CHECK_INTERVAL: 1000,  // Интервал проверки загрузки таблицы
+            MAX_TABLE_CHECK_ATTEMPTS: 200, // Максимальное количество попыток проверки таблицы
+            TABLE_SELECTOR: 'table#batch_data_table', // Селектор таблицы с результатами
+        },
+
+        // Размеры контейнера
+        CONTAINER_SIZE: {
+            width: '300px',
+            height: '500px'
+        },
+
+        // Настройки стилей
+        STYLES: {
+            headerBackground: '#2c3e50',
+            headerTextColor: 'white',
+            buttonHoverColor: '#34495e'
+        },
+
+        // Настройки проверки страницы
+        CHECK_ATTEMPTS: {
+            MAX_ATTEMPTS: 10,    // Максимальное количество попыток
+            RETRY_DELAY: 1000    // Задержка между попытками в миллисекундах
+        },
+
+        // Дополнительные паттерны для регулярного выражения
+        ADDITIONAL_PATTERNS: [
+            // Добавьте сюда дополнительные паттерны, например:
+            // 'example\\.com',
+            // 'test\\.org'
+        ]
+    }
+    // Создаем основные стили
+    const styles = `
+        .custom-container {
+            position: fixed;
+            bottom: ${CONFIG.INITIAL_POSITION.bottom};
+            right: ${CONFIG.INITIAL_POSITION.right};
+            width: ${CONFIG.CONTAINER_SIZE.width};
+            background: white;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            z-index: 10000;
+            font-family: Arial, sans-serif;
+        }
+        .custom-container.minimized {
+            width: auto;
+            height: auto;
+        }
+        .custom-header {
+            padding: 8px;
+            background: ${CONFIG.STYLES.headerBackground};
+            border-bottom: 1px solid ${CONFIG.STYLES.buttonHoverColor};
+            color: ${CONFIG.STYLES.headerTextColor};
+            cursor: move;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .custom-controls {
+            display: flex;
+            gap: 5px;
+        }
+        .custom-button {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 2px 6px;
+            color: white;
+        }
+        .custom-button:hover {
+            background: #ddd;
+            border-radius: 3px;
+        }
+        .custom-content {
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            height: ${CONFIG.CONTAINER_SIZE.height.replace('px', '')}px;
+        }
+        .custom-content.hidden {
+            display: none;
+        }
+        .custom-textarea {
+            width: 100%;
+            height: calc(100% - 90px);
+            resize: none;
+            padding: 8px;
+            border: 1px solid #ddd;
+            background-color: #f8f9fa;
+            color: #333;
+            border-radius: 4px;
+            font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .custom-start-button {
+            padding: 8px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .custom-start-button:hover {
+            background: #45a049;
+        }
+        .copyright {
+            font-size: 12px;
+            margin-top: 5px;
+            text-align: center;
+            color: #2c3e50;
+        }
+        .copyright a {
+            text-decoration: underline;
+            color: #FF8D87;
+        }
+    `;
+
+    // Добавляем стили на страницу
+    const styleSheet = document.createElement('style');
+    styleSheet.textContent = styles;
+    document.head.appendChild(styleSheet);
+
+    // Глобальные переменные для перетаскивания
+    let isDragging = false;
+    let currentX;
+    let currentY;
+    let initialX;
+    let initialY;
+    let xOffset = 0;
+    let yOffset = 0;
+
+    // Функции для работы с перетаскиванием
+    function dragStart(e) {
+        if (e.type === "mousedown") {
+            initialX = e.clientX - xOffset;
+            initialY = e.clientY - yOffset;
+        }
+
+        if (e.target.closest('.custom-controls')) return;
+
+        isDragging = true;
+    }
+
+    function dragEnd(e) {
+        initialX = currentX;
+        initialY = currentY;
+        isDragging = false;
+    }
+
+    function drag(e) {
+        if (isDragging) {
+            e.preventDefault();
+            currentX = e.clientX - initialX;
+            currentY = e.clientY - initialY;
+            xOffset = currentX;
+            yOffset = currentY;
+
+            const container = document.querySelector('.custom-container');
+            container.style.transform = `translate(${currentX}px, ${currentY}px)`;
+        }
+    }
+
+    function updateContainerState() {
+        const container = document.querySelector('.custom-container');
+        if (!container) return;
+
+        const content = container.querySelector('.custom-content');
+        const textarea = container.querySelector('.custom-textarea');
+
+        if (textarea.value.trim() !== '') {
+            // Если есть текст, разворачиваем контейнер
+            content.classList.remove('hidden');
+            container.classList.remove('minimized');
+        }
+    }
+
+    // Инициализация обработчиков событий
+    function initHandlers(container) {
+        const header = container.querySelector('.custom-header');
+        const minimizeBtn = container.querySelector('.minimize-btn');
+        const closeBtn = container.querySelector('.close-btn');
+        const content = container.querySelector('.custom-content');
+        const textarea = container.querySelector('.custom-textarea');
+        const startButton = container.querySelector('.custom-start-button');
+
+        // Обработчики перетаскивания
+        header.addEventListener('mousedown', dragStart);
+        document.addEventListener('mousemove', drag);
+        document.addEventListener('mouseup', dragEnd);
+
+        // Обработчики кнопок
+        minimizeBtn.addEventListener('click', () => {
+            if (textarea.value.trim() === '') {
+                content.classList.toggle('hidden');
+                container.classList.toggle('minimized');
+            }
+        });
+
+        closeBtn.addEventListener('click', () => {
+            container.remove();
+        });
+
+        // Сохранение при изменении textarea
+        textarea.addEventListener('input', () => {
+            saveTextarea(textarea.value);
+            updateContainerState();
+        });
+
+        // Обработчик кнопки "Старт"
+        startButton.addEventListener('click', processNextDomain);
+    }
+
+    // Функция создания и инициализации контейнера
+    function initContainer() {
+        // Проверяем, не существует ли уже контейнер
+        if (document.querySelector('.custom-container')) {
+            return;
+        }
+
+        // Создаем HTML структуру
+        const container = document.createElement('div');
+        container.className = 'custom-container minimized';
+        container.innerHTML = `
+            <div class="custom-header">
+                <span>Инструмент</span>
+                <div class="custom-controls">
+                    <button class="custom-button minimize-btn">_</button>
+                    <button class="custom-button close-btn">×</button>
+                </div>
+            </div>
+            <div class="custom-content hidden">
+                <textarea class="custom-textarea" placeholder="Введите текст..."></textarea>
+                <button class="custom-start-button">Старт</button>
+                <p class="copyright">TG-канал автора: <a href="https://t.me/craftseo" target="_blank">Крафтовое SEO</a></p>
+            </div>
+        `;
+
+        document.body.appendChild(container);
+
+        // Инициализируем обработчики
+        initHandlers(container);
+
+        // Инициализация textarea из сохраненного значения
+        const textarea = container.querySelector('.custom-textarea');
+        textarea.value = loadTextarea();
+        updateContainerState();
+    }
+
+    // Функция для сохранения текста в localStorage
+    function saveTextarea(text) {
+        localStorage.setItem('ahrefsHelperText', text);
+    }
+
+    // Функция для загрузки текста из localStorage
+    function loadTextarea() {
+        return localStorage.getItem('ahrefsHelperText') || '';
+    }
+
+    async function waitForTableLoad(domainToCheck) {
+        console.log(`Waiting for table to load with domain: ${domainToCheck}`);
+        for (let i = 0; i < CONFIG.BATCH_ANALYSIS.MAX_TABLE_CHECK_ATTEMPTS; i++) {
+            const table = document.querySelector(CONFIG.BATCH_ANALYSIS.TABLE_SELECTOR);
+            if (table) {
+                const tableText = table.innerText;
+                const domainCount = (tableText.match(new RegExp(domainToCheck, 'g')) || []).length;
+                console.log(`Attempt ${i + 1}: Found domain "${domainToCheck}" ${domainCount} times in table`);
+
+                if (domainCount > 0) {
+                    console.log('Table fully loaded');
+                    return true;
+                }
+            } else {
+                console.log(`Attempt ${i + 1}: Table not found`);
+            }
+            await new Promise(resolve => setTimeout(resolve, CONFIG.BATCH_ANALYSIS.TABLE_CHECK_INTERVAL));
+        }
+        console.log('Table load timeout exceeded');
+        return false;
+    }
+
+    function processSiteExplorer() {
+        const textarea = document.querySelector('.custom-textarea');
+        if (!textarea) return;
+
+        const lines = textarea.value.trim().split('\n').filter(line => line.trim() !== '');
+
+        if (lines.length === 0) {
+            alert('Нет доменов для обработки');
+            return;
+        }
+
+        const firstLine = lines[0];
+        const domainRegex = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
+
+        if (!domainRegex.test(firstLine)) {
+            alert('Пожалуйста, введите корректный домен');
+            return;
+        }
+
+        const newText = lines.slice(1).join('\n');
+        textarea.value = newText;
+        saveTextarea(newText);
+
+        const baseUrl = prepareBaseUrl();
+        const finalUrl = `${baseUrl}${firstLine}/`;
+        window.location.href = finalUrl;
+    }
+
+    async function waitForModalClose(modalSelector, maxWaitTime, checkInterval) {
+        const startTime = Date.now();
+
+        while (Date.now() - startTime < maxWaitTime) {
+            const modal = document.querySelector(modalSelector);
+            if (!modal || modal.style.display === 'none') {
+                console.log('Modal closed successfully');
+                return true;
+            }
+            await new Promise(resolve => setTimeout(resolve, checkInterval));
+        }
+
+        console.log('Modal close timeout exceeded');
+        return false;
+    }
+
+    async function processBatchAnalysis() {
+        const textarea = document.querySelector('.custom-textarea');
+        if (!textarea) return;
+
+        const lines = textarea.value.trim().split('\n').filter(line => line.trim() !== '');
+
+        if (lines.length === 0) {
+            alert('Нет доменов для обработки');
+            return;
+        }
+
+        // Берем первые 200 доменов и проверяем их
+        const domainRegex = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
+        const domainsToProcess = lines
+        .slice(0, CONFIG.BATCH_ANALYSIS.DOMAINS_PER_BATCH)
+        .filter(line => domainRegex.test(line));
+
+        console.log(`Processing ${domainsToProcess.length} domains in batch analysis`);
+
+        // Оставляем остальные домены
+        const remainingDomains = lines.slice(CONFIG.BATCH_ANALYSIS.DOMAINS_PER_BATCH);
+
+        // Обновляем наше поле ввода
+        textarea.value = remainingDomains.join('\n');
+        saveTextarea(textarea.value);
+
+        // Находим форму на странице
+        const batchForm = document.querySelector(CONFIG.BATCH_ANALYSIS.FORM_SELECTOR);
+        if (!batchForm) {
+            console.log('Batch analysis form not found');
+            return;
+        }
+
+        // Вставляем домены в форму
+        batchForm.value = domainsToProcess.join('\n');
+
+        console.log(`Inserted ${domainsToProcess.length} domains into form`);
+        console.log('First domain:', domainsToProcess[0]);
+
+        // Находим и нажимаем кнопку анализа
+        const analyseButton = document.querySelector(CONFIG.BATCH_ANALYSIS.ANALYSE_BUTTON);
+        if (!analyseButton) return;
+
+        console.log('Clicking Analyse button...');
+        analyseButton.click();
+
+        console.log('Waiting for table to load...');
+        const tableLoaded = await waitForTableLoad(domainsToProcess[0]);
+        if (!tableLoaded) {
+            console.log('Failed to load table, retrying with next batch');
+            if (remainingDomains.length > 0) {
+                processNextDomain();
+            }
+            return;
+        }
+
+        // Ждем, пока данные загрузятся (ждем появления Export кнопки)
+        console.log('Waiting for Export button...');
+        let exportButton = null;
+        for (let i = 0; i < CONFIG.BATCH_ANALYSIS.MAX_WAIT_ATTEMPTS; i++) {
+            console.log(`Attempt ${i + 1}/${CONFIG.BATCH_ANALYSIS.MAX_WAIT_ATTEMPTS}: Checking Export button`);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            exportButton = document.querySelector(CONFIG.BATCH_ANALYSIS.EXPORT_BUTTON);
+            if (exportButton) {
+                console.log('Export button state:', exportButton.disabled ? 'disabled' : 'enabled');
+                if (!exportButton.disabled) {
+                    console.log('Export button found and enabled');
+                    break;
+                }
+            }
+        }
+
+        if (!exportButton || exportButton.disabled) {
+            console.log('Export button not found or still disabled after waiting');
+            return;
+        }
+
+        console.log('Table loaded successfully, proceeding to export');
+
+        // Ждем дополнительное время для уверенности, что все данные загрузились
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Нажимаем на Export
+        console.log('Clicking Export button...');
+        exportButton.click();
+        console.log('Export button clicked, waiting for modal...');
+
+        // Ждем появления модального окна
+        console.log('Waiting for modal window...');
+        let startExportButton = null;
+        for (let i = 0; i < CONFIG.BATCH_ANALYSIS.MAX_WAIT_ATTEMPTS; i++) {
+            console.log(`Attempt ${i + 1}/${CONFIG.BATCH_ANALYSIS.MAX_WAIT_ATTEMPTS}: Checking for modal`);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            const modal = document.querySelector(CONFIG.BATCH_ANALYSIS.MODAL_SELECTOR);
+            console.log('Modal present:', !!modal);
+
+            startExportButton = document.querySelector(CONFIG.BATCH_ANALYSIS.START_EXPORT_BUTTON);
+            if (startExportButton) {
+                console.log('Start Export button found');
+                break;
+            }
+        }
+
+        if (!startExportButton) {
+            console.log('Start Export button not found');
+            return;
+        }
+
+        // Нажимаем Start Export
+        console.log('Clicking Start Export button...');
+        startExportButton.click();
+
+        // Ждем завершения экспорта
+        console.log(`Waiting ${CONFIG.BATCH_ANALYSIS.EXPORT_WAIT_TIME}ms for export to complete...`);
+        await new Promise(resolve => setTimeout(resolve, CONFIG.BATCH_ANALYSIS.EXPORT_WAIT_TIME));
+
+        // Находим и нажимаем кнопку Cancel
+        const cancelButton = document.querySelector(CONFIG.BATCH_ANALYSIS.CANCEL_BUTTON);
+        if (cancelButton) {
+            console.log('Clicking Cancel button...');
+            cancelButton.click();
+
+            // Ждем закрытия модального окна
+            const modalClosed = await waitForModalClose(
+                CONFIG.BATCH_ANALYSIS.MODAL_SELECTOR,
+                CONFIG.BATCH_ANALYSIS.MODAL_CLOSE_WAIT,
+                CONFIG.BATCH_ANALYSIS.MODAL_CHECK_INTERVAL
+            );
+
+            if (!modalClosed) {
+                // Если модальное окно не закрылось, пробуем закрыть его программно
+                const modal = document.querySelector(CONFIG.BATCH_ANALYSIS.MODAL_SELECTOR);
+                if (modal) {
+                    modal.style.display = 'none';
+                    modal.setAttribute('aria-hidden', 'true');
+                    document.body.classList.remove('modal-open');
+                    const backdrop = document.querySelector('.modal-backdrop');
+                    if (backdrop) backdrop.remove();
+                }
+            }
+
+            // Дополнительная пауза после закрытия модального окна
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+
+        console.log('Export wait complete, checking for remaining domains...');
+        // Переходим к следующей партии доменов
+        if (remainingDomains.length > 0) {
+            processNextDomain();
+        }
+    }
+
+    function processNextDomain() {
+        if (window.location.href.includes('batch-analysis')) {
+            processBatchAnalysis();
+        } else {
+            processSiteExplorer();
+        }
+    }
+
+    // Функция для периодической проверки готовности DOM
+    function tryInitialize() {
+        if (document.readyState === 'complete' && document.body) {
+            console.log('Initializing container...');
+            initContainer();
+
+            // Проверка страницы и запуск соответствующей логики
+            if (window.location.href.includes('app.ahrefs.com/v2-site-explorer/backlinks')) {
+                setTimeout(checkGroupsCount, CONFIG.PAGE_LOAD_DELAY);
+            } else if (window.location.href.includes('batch-analysis')) {
+                setTimeout(processNextDomain, CONFIG.PAGE_LOAD_DELAY);
+            }
+        } else {
+            console.log('DOM not ready, retrying...');
+            setTimeout(tryInitialize, 1000);
+        }
+    }
+
+    // Запускаем инициализацию
+    console.log('Starting script...');
+    tryInitialize();
+})();
